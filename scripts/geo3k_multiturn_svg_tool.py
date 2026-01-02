@@ -33,7 +33,7 @@ if __name__ == "__main__":
     parser.add_argument("--local_dataset_path", default=None, help="The local path to the raw dataset, if it exists.")
     parser.add_argument(
         "--local_save_dir",
-        default="/proj/inf-scaling/csl/svglm/data/geo3k_multiturn_eval",
+        default="/proj/inf-scaling/csl/svglm/data/geo3k_multiturn_rl",
         help="The save directory for the preprocessed dataset.",
     )
 
@@ -50,17 +50,36 @@ if __name__ == "__main__":
     train_dataset = dataset["train"]
     test_dataset = dataset["test"]
 
+    # System prompt from agent.py
+    system_prompt = (
+        "You are a geometry and visualization assistant that solves problems by generating SVG diagrams "
+        "and inspecting their rendered images.\n\n"
+        "You MUST strictly follow this response structure:\n"
+        "1) First, output a <think>...</think> block.\n"
+        "2) After the first <think>, you MAY call the svg_to_png tool (SVG code ONLY in the tool arguments).\n"
+        "3) After receiving the rendered image, you MUST output another <think>...</think> block that inspects the image.\n"
+        "4) If anything is unclear or incorrect, refine the SVG and call svg_to_png again. You may call svg_to_png multiple times.\n"
+        "5) Finally, output an <answer>...</answer> block with step-by-step solution and final result.\n\n"
+        "Additional rules:\n"
+        "- Every svg_to_png tool call MUST be preceded by a <think>...</think> block.\n"
+        "- Between any tool call and the final <answer>, there MUST be at least one <think>...</think> block.\n"
+        "- Do NOT put SVG code inside <think> or <answer>; SVG code only appears inside the tool call arguments.\n"
+        "- The final answer must ONLY appear inside <answer>.\n"
+    )
+
+    # Instruction following prompt from agent.py  
     instruction_following = (
         r"You FIRST think about the reasoning process as an internal monologue and then provide the final answer. "
         r"The reasoning process MUST BE enclosed within <think> </think> tags. "
-        r"The final answer must be formatted as (replace your answer with actual answer): <answer> Final answer: your answer </answer>"
+        r"The final answer MUST BE put in \boxed{}."
     )
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
             problem = example.pop("problem")
-            prompt = problem + " " + instruction_following
+            # prompt = problem + " " + instruction_following
+            prompt = problem
             answer = example.pop("answer")
             images = example.pop("images")
             data = {
@@ -68,9 +87,7 @@ if __name__ == "__main__":
                 "prompt": [
                     {
                         "role": "system",
-                        "content": (
-                            "You are a math expert. You are given a question and you need to solve it step by step. "
-                        ),
+                        "content": system_prompt,
                     },
                     {
                         "role": "user",
@@ -87,8 +104,8 @@ if __name__ == "__main__":
                     "question": problem,
                     "need_tools_kwargs": True,
                     "tools_kwargs": {
-                        "calc_geo3k_reward": {
-                            "create_kwargs": {"ground_truth": answer},
+                        "svg_to_png": {
+                            "create_kwargs": {"dummy": None},
                             # "execute_kwargs": {},
                             # "calc_reward_kwargs": {},
                             # "release_kwargs": {},

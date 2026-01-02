@@ -6,6 +6,9 @@ defaults:
   - ppo_trainer
   - _self_
 
+ray_init_kwargs:
+  working_dir: /proj/inf-scaling/csl/ray_temp
+
 data:
   max_prompt_length: 2048
   max_response_length: 2048

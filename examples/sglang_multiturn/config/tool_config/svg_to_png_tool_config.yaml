@@ -1,0 +1,16 @@
+tools:
+  - class_name: "verl.tools.svg_to_png_tool.SvgToPngTool"
+    config:
+      type: native
+    tool_schema:
+      type: "function"
+      function:
+        name: "svg_to_png"
+        description: "Converts SVG code to PNG image for visual inspection and verification"
+        parameters:
+          type: "object"
+          properties:
+            svg_code:
+              type: "string"
+              description: "Complete SVG code as a string"
+          required: ["svg_code"]

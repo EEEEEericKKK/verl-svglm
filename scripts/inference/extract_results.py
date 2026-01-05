@@ -95,6 +95,8 @@ def main():
                 
                 # Extract ground truth answer
                 ground_truth = data.get('original_sample', {}).get('extra_info', {}).get('answer', '')
+                if ground_truth == '':
+                    ground_truth = data.get('original_sample', {}).get('answer', '')
                 
                 # Extract model's final answer from conversation
                 conversation = data.get('generated_conversation', [])

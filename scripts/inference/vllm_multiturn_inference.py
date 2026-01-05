@@ -24,6 +24,31 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
+# System Message
+# ============================================================================
+
+
+def get_system_message():
+    # return "You are an expert in solving logical reasoning problems with visualizations. Your final answer should be formatted as: <answer> Final answer: xxx </answer>. You should replace xxx with your final answer."
+    # """Extract the system message from the SVGAgent."""
+    return (
+        "You are a geometry and visualization assistant that solves problems by generating SVG diagrams "
+        "and inspecting their rendered images.\n\n"
+        "You MUST strictly follow this response structure:\n"
+        "1) First, output a <think>...</think> block.\n"
+        "2) After the first <think>, you MAY call the svg_to_png tool (SVG code ONLY in the tool arguments).\n"
+        "3) After receiving the rendered image, you MUST output another <think>...</think> block that inspects the image.\n"
+        "4) If anything is unclear or incorrect, refine the SVG and call svg_to_png again. You may call svg_to_png multiple times.\n"
+        "5) Finally, output an <answer>...</answer> block with step-by-step solution and final result.\n\n"
+        "Additional rules:\n"
+        "- Every svg_to_png tool call MUST be preceded by a <think>...</think> block.\n"
+        "- Between any tool call and the final <answer>, there MUST be at least one <think>...</think> block.\n"
+        "- Do NOT put SVG code inside <think> or <answer>; SVG code only appears inside the tool call arguments.\n"
+        "- The final answer must ONLY appear inside <answer>.\n"
+    )
+
+
+# ============================================================================
 # SVG to PNG Tool (copied from verl/tools/svg_to_png_tool.py)
 # ============================================================================
 
@@ -161,12 +186,12 @@ def extract_thinking(text: str) -> tuple[str, str]:
     end_tag = '</think>'
     
     start = text.find(start_tag)
-    if start == -1:
-        return "", text
     
     end = text.find(end_tag, start + len(start_tag))
     if end == -1:
         return "", text
+    if start == -1:
+        start = -len(start_tag)
     
     thinking = text[start + len(start_tag):end]
     text_without_thinking = text[:start] + text[end + len(end_tag):]
@@ -475,16 +500,71 @@ def process_sample(
     max_tokens: int = 2048,
 ) -> Dict[str, Any]:
     """Process a single sample from the dataset."""
-    # Get prompt (HF chat format) and images
+    # Support two dataset formats:
+    # Format 1: prompt as list of messages, images as list of bytes
+    # Format 2: prompt as single string, image as single PIL/bytes object
+    
     prompt_messages = sample.get('prompt', [])
     images_data = sample.get('images', [])
     
-    if not prompt_messages:
+    # For mathcanvas dataset
+    if 'question_images' in sample and 'question_interleave' in sample:
+        question_images = sample.get('question_images', [])
+        question_interleave = sample.get('question_interleave', [])
+        
+        # Create messages with system message
+        prompt_messages = [{"role": "system", "content": get_system_message()}]
+        img_idx = 0
+        
+        for item in question_interleave:
+            if item['type'] == 'text':
+                prompt_messages.append({
+                    "role": "user",
+                    "content": item['content']
+                })
+            elif item['type'] == 'image':
+                if 0 <= img_idx < len(question_images):
+                    img_data = question_images[img_idx]
+                    images_data.append(img_data)
+                    prompt_messages.append({
+                        "role": "user",
+                        "content": "<image>"
+                    })
+                    img_idx += 1
+        
+        # Process images from bytes
+        processed_images = process_images_from_bytes(images_data)
+    # For ROVER dataset
+    elif isinstance(prompt_messages, str) and 'image' in sample:
+        # Convert to format 1
+        user_message = prompt_messages
+        single_image = sample.get('image')
+        
+        # Create messages with system message and user message with <image> placeholder
+        prompt_messages = [
+            {"role": "system", "content": get_system_message()},
+            {"role": "user", "content": f"<image>\n{user_message}"}
+        ]
+        
+        # Convert single image to images list format
+        if isinstance(single_image, Image.Image):
+            processed_images = [single_image]
+        elif isinstance(single_image, dict) and 'bytes' in single_image:
+            images_data = [single_image]
+            processed_images = process_images_from_bytes(images_data)
+        elif hasattr(single_image, 'read'):  # file-like object
+            from io import BytesIO
+            pil_image = Image.open(single_image).convert('RGB')
+            processed_images = [pil_image]
+        else:
+            logger.warning("Unsupported image format in 'image' column, skipping")
+            return None
+    elif not prompt_messages:
         logger.warning("No prompt messages found in sample, skipping")
         return None
-    
-    # Process images from bytes
-    processed_images = process_images_from_bytes(images_data)
+    else:
+        # Format 1: process images from bytes
+        processed_images = process_images_from_bytes(images_data)
     
     # Attach images to messages with <image> placeholders
     initial_messages = attach_images_to_messages(prompt_messages, processed_images)
@@ -498,9 +578,25 @@ def process_sample(
         max_tokens=max_tokens
     )
     
-    # Create a JSON-serializable version of the sample (exclude image bytes)
-    serializable_sample = {k: v for k, v in sample.items() if k != 'images'}
-    serializable_sample['num_images'] = len(images_data)
+    # Create a JSON-serializable version of the sample (exclude image bytes and other non-serializable data)
+    def is_json_serializable(obj):
+        """Check if an object is JSON serializable."""
+        if obj is None or isinstance(obj, (bool, int, float, str)):
+            return True
+        if isinstance(obj, (list, tuple)):
+            return all(is_json_serializable(item) for item in obj)
+        if isinstance(obj, dict):
+            return all(isinstance(k, str) and is_json_serializable(v) for k, v in obj.items())
+        return False
+    
+    serializable_sample = {}
+    for k, v in sample.items():
+        if k not in ['images', 'image']:
+            if is_json_serializable(v):
+                serializable_sample[k] = v
+            # Skip non-serializable values
+    
+    serializable_sample['num_images'] = len(processed_images)
     
     # Convert conversation to serializable format (exclude PIL images)
     serializable_conversation = []

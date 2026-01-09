@@ -3,6 +3,7 @@
 # Multi-modal, Multi-turn Tool Use Inference with vLLM for Geometry3k Dataset
 
 import argparse
+import io
 import json
 import logging
 import os
@@ -29,23 +30,24 @@ logger = logging.getLogger(__name__)
 
 
 def get_system_message():
-    # return "You are an expert in solving logical reasoning problems with visualizations. Your final answer should be formatted as: <answer> Final answer: xxx </answer>. You should replace xxx with your final answer."
+    # return "You are an expert in solving plane geometry reasoning problems. Your final answer should be presented as: \\boxed{answer}."
     # """Extract the system message from the SVGAgent."""
-    return (
-        "You are a geometry and visualization assistant that solves problems by generating SVG diagrams "
-        "and inspecting their rendered images.\n\n"
-        "You MUST strictly follow this response structure:\n"
-        "1) First, output a <think>...</think> block.\n"
-        "2) After the first <think>, you MAY call the svg_to_png tool (SVG code ONLY in the tool arguments).\n"
-        "3) After receiving the rendered image, you MUST output another <think>...</think> block that inspects the image.\n"
-        "4) If anything is unclear or incorrect, refine the SVG and call svg_to_png again. You may call svg_to_png multiple times.\n"
-        "5) Finally, output an <answer>...</answer> block with step-by-step solution and final result.\n\n"
-        "Additional rules:\n"
-        "- Every svg_to_png tool call MUST be preceded by a <think>...</think> block.\n"
-        "- Between any tool call and the final <answer>, there MUST be at least one <think>...</think> block.\n"
-        "- Do NOT put SVG code inside <think> or <answer>; SVG code only appears inside the tool call arguments.\n"
-        "- The final answer must ONLY appear inside <answer>.\n"
+    SYSTEM_PROMPT = (
+        "You are an expert geometry tutor specializing in solving plane geometry, solid geometry, and analytic geometry problems. "
+        "Your goal is to analyze problems step-by-step, provide clear mathematical reasoning, and deliver accurate solutions.\n\n"
+        "You have access to the svg_tool which generates geometric diagrams. Use it when:\n"
+        "- A diagram is needed to visualize the problem or solution steps\n"
+        "- Adding auxiliary constructions (helper lines) would clarify the geometric relationships\n"
+        "- Reconstructing a complete diagram helps illustrate the problem setup\n\n"
+        "**Tool Usage:**\n"
+        "- Tool name: svg_tool\n"
+        "- Arguments:\n"
+        "  - svg_str: SVG code for the diagram (use 1000x1000 viewBox)\n"
+        "  - task_type: Either 'full_reconstruction' (create complete diagram) or 'auxiliary' (add helper lines to existing diagram)\n\n"
+        "Before drawing the diagram, think through the problem carefully. Explicitly state your reasoning process beginning with: \"Thinking for Drawing:\". Your thinking should include the coordinates of key points and any geometric relationships you consider.\n"
+        "Always provide clear explanations of your reasoning, show all calculation steps, and present final answers in boxed format: \\boxed{answer}"
     )
+    return SYSTEM_PROMPT
 
 
 # ============================================================================
@@ -79,17 +81,22 @@ class SvgToPngTool:
         return {
             "type": "function",
             "function": {
-                "name": "svg_to_png",
-                "description": "Converts SVG code to PNG image for visual inspection",
+                "name": "svg_tool",
+                "description": "Generates geometric diagrams from SVG code",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "svg_code": {
+                        "svg_str": {
                             "type": "string",
-                            "description": "Complete SVG code as a string",
+                            "description": "SVG code for the diagram (use 1000x1000 viewBox)",
+                        },
+                        "task_type": {
+                            "type": "string",
+                            "description": "Either 'full_reconstruction' (create complete diagram) or 'auxiliary' (add helper lines to existing diagram)",
+                            "enum": ["full_reconstruction", "auxiliary"],
                         },
                     },
-                    "required": ["svg_code"],
+                    "required": ["svg_str", "task_type"],
                 },
             }
         }
@@ -99,46 +106,98 @@ class SvgToPngTool:
         if instance_id is None:
             instance_id = str(uuid4())
         self._instance_dict[instance_id] = {
-            "svg_code": "",
+            "svg_str": "",
             "png_image": None,
+            "images": [],  # Track all images for auxiliary task
         }
         return instance_id
     
-    def execute(self, instance_id: str, svg_code: str) -> tuple[Optional[Image.Image], str, bool]:
+    def store_initial_images(self, instance_id: str, images: List[Image.Image]):
+        """Store initial images from the conversation in the tool instance."""
+        if instance_id in self._instance_dict:
+            self._instance_dict[instance_id]["images"].extend(images)
+    
+    def execute(self, instance_id: str, svg_str: str, task_type: str) -> tuple[Optional[Image.Image], str, bool]:
         """
-        Execute the tool to convert SVG to PNG.
+        Execute the tool to render SVG to PNG.
+        
+        Args:
+            instance_id: Tool instance identifier
+            svg_str: SVG code as string
+            task_type: Either 'full_reconstruction' or 'auxiliary'
         
         Returns:
             tuple: (image, message, success)
         """
-        if not isinstance(svg_code, str):
-            svg_code = str(svg_code)
+        if not isinstance(svg_str, str):
+            svg_str = str(svg_str)
         
-        self._instance_dict[instance_id]["svg_code"] = svg_code
+        if task_type not in ["full_reconstruction", "auxiliary"]:
+            return None, f"Invalid task_type: {task_type}. Must be 'full_reconstruction' or 'auxiliary'.", False
+        
+        self._instance_dict[instance_id]["svg_str"] = svg_str
         
         try:
-            # Convert SVG to PNG
-            png_path = os.path.join(self._temp_dir, f"{instance_id}.png")
-            cairosvg.svg2png(
-                bytestring=svg_code.encode('utf-8'),
-                write_to=png_path
-            )
+            # Convert SVG to PNG with transparency
+            svg_png_bytes = cairosvg.svg2png(bytestring=svg_str.encode('utf-8'))
+            svg_img = Image.open(io.BytesIO(svg_png_bytes)).convert('RGBA')
             
-            # Load as PIL Image
-            pil_image = Image.open(png_path).convert("RGB")
-            processed_image = process_image(pil_image)
+            svg_width, svg_height = svg_img.size
+            
+            # Handle background based on task type
+            if task_type == "auxiliary":
+                # Get background image from instance data
+                instance_data = self._instance_dict.get(instance_id, {})
+                images = instance_data.get("images", [])
+                
+                if images:
+                    # Use the first image as background
+                    background_image = images[0]
+                    background = background_image.convert('RGB')
+                    orig_width, orig_height = background.size
+                    
+                    # Resize background to match SVG dimensions
+                    if orig_width > orig_height:
+                        new_width = svg_width
+                        new_height = int(orig_height * svg_width / orig_width)
+                    else:
+                        new_height = svg_height
+                        new_width = int(orig_width * svg_height / orig_height)
+                    
+                    background = background.resize((new_width, new_height), Image.LANCZOS)
+                    
+                    # Center on white canvas if needed
+                    if new_width < svg_width or new_height < svg_height:
+                        white_bg = Image.new('RGB', (svg_width, svg_height), 'white')
+                        x_offset = (svg_width - new_width) // 2
+                        y_offset = (svg_height - new_height) // 2
+                        white_bg.paste(background, (x_offset, y_offset))
+                        background = white_bg
+                    elif new_width > svg_width or new_height > svg_height:
+                        x_offset = (new_width - svg_width) // 2
+                        y_offset = (new_height - svg_height) // 2
+                        background = background.crop((x_offset, y_offset, x_offset + svg_width, y_offset + svg_height))
+                else:
+                    # No background available, use white background
+                    background = Image.new('RGB', (svg_width, svg_height), 'white')
+            else:
+                # Full reconstruction: use white background
+                background = Image.new('RGB', (svg_width, svg_height), 'white')
+            
+            # Composite SVG on top of background
+            background.paste(svg_img, (0, 0), svg_img)
+            
+            # Process final image
+            processed_image = process_image(background)
             
             self._instance_dict[instance_id]["png_image"] = processed_image
+            self._instance_dict[instance_id]["images"].append(processed_image)
             
-            message = (
-                "Here is the rendered image from your SVG. "
-                "Please inspect it carefully, verify it matches your intent, "
-                "and refine the SVG if needed. If it's correct, proceed to solve and finish."
-            )
+            message = ""
             return processed_image, message, True
             
         except Exception as e:
-            error_msg = f"Error converting SVG to PNG: {str(e)}"
+            error_msg = f"Error rendering SVG: {str(e)}"
             logger.error(error_msg)
             return None, error_msg, False
     
@@ -362,15 +421,34 @@ class MultiTurnInferenceEngine:
         temperature: float = 0.7,
         top_p: float = 0.9,
         max_tokens: int = 2048,
+        output_dir: Optional[str] = None,
     ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Run multi-turn inference with tool use.
+        
+        Args:
+            output_dir: Directory to save generated images (defaults to temp dir)
         
         Returns:
             tuple: (full_conversation, metadata)
         """
         messages = initial_messages.copy()
         instance_id = self.tool.create_instance()
+        
+        # Extract and store initial images from messages for auxiliary tasks
+        initial_images = []
+        for msg in initial_messages:
+            content = msg.get('content', [])
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'image':
+                        img = item.get('image')
+                        if isinstance(img, Image.Image):
+                            initial_images.append(img)
+        
+        if initial_images:
+            self.tool.store_initial_images(instance_id, initial_images)
+        
         metadata = {
             "turns": 0,
             "tool_calls": 0,
@@ -410,38 +488,42 @@ class MultiTurnInferenceEngine:
                 if isinstance(arguments, str):
                     arguments = json.loads(arguments)
                 
-                if function_name == "svg_to_png":
-                    svg_code = arguments.get("svg_code", "")
-                    image, message, success = self.tool.execute(instance_id, svg_code)
+                if function_name == "svg_tool":
+                    svg_str = arguments.get("svg_str", "")
+                    task_type = arguments.get("task_type", "full_reconstruction")
+                    
+                    image, message, success = self.tool.execute(instance_id, svg_str, task_type)
                     
                     if success:
                         metadata["successful_tool_calls"] += 1
                         
                         # Add tool response with image
                         tool_message = {
-                            "role": "user",
+                            "role": "tool",
                             "content": [
                                 {"type": "text", "text": message}
                             ]
                         }
                         
                         if image:
-                            # Save image temporarily
-                            temp_image_path = os.path.join(
-                                self.tool._temp_dir,
-                                f"{instance_id}_result.png"
-                            )
-                            image.save(temp_image_path)
+                            # Save image to output directory or temp directory
+                            save_dir = output_dir if output_dir else self.tool._temp_dir
+                            os.makedirs(save_dir, exist_ok=True)
+                            
+                            image_filename = f"generated_{metadata['successful_tool_calls']}_turn_{turn}_{task_type}.png"
+                            image_path = os.path.join(save_dir, image_filename)
+                            image.save(image_path)
+                            
                             tool_message["content"].append({
                                 "type": "image",
-                                "image": f"file://{temp_image_path}"
+                                "image": f"file://{image_path}"
                             })
                         
                         messages.append(tool_message)
                     else:
                         # Tool execution failed
                         messages.append({
-                            "role": "user",
+                            "role": "tool",
                             "content": message
                         })
                 else:
@@ -498,6 +580,8 @@ def process_sample(
     temperature: float = 0.7,
     top_p: float = 0.9,
     max_tokens: int = 2048,
+    output_dir: Optional[str] = None,
+    sample_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Process a single sample from the dataset."""
     # Support two dataset formats:
@@ -566,6 +650,17 @@ def process_sample(
         # Format 1: process images from bytes
         processed_images = process_images_from_bytes(images_data)
     
+    # Save input images to sample-specific directory
+    if output_dir and processed_images:
+        sample_output_dir = os.path.join(output_dir, sample_id or "sample")
+        os.makedirs(sample_output_dir, exist_ok=True)
+        
+        for img_idx, img in enumerate(processed_images):
+            input_image_path = os.path.join(sample_output_dir, f"input_{img_idx}.png")
+            img.save(input_image_path)
+    else:
+        sample_output_dir = output_dir
+    
     # Attach images to messages with <image> placeholders
     initial_messages = attach_images_to_messages(prompt_messages, processed_images)
     
@@ -575,7 +670,8 @@ def process_sample(
         max_turns=max_turns,
         temperature=temperature,
         top_p=top_p,
-        max_tokens=max_tokens
+        max_tokens=max_tokens,
+        output_dir=sample_output_dir
     )
     
     # Create a JSON-serializable version of the sample (exclude image bytes and other non-serializable data)
@@ -751,10 +847,23 @@ def main():
     logger.info("Starting inference...")
     results = []
     
-    os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
+    output_dir = os.path.dirname(args.output_path)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get base name for output file (without extension)
+    output_basename = os.path.splitext(os.path.basename(args.output_path))[0]
+    
+    # Create images subdirectory with same name as output file
+    images_output_dir = os.path.join(output_dir, f"{output_basename}_images")
+    os.makedirs(images_output_dir, exist_ok=True)
     
     with open(args.output_path, 'w') as f:
         for idx, sample in enumerate(tqdm(dataset, desc="Processing samples")):
+            # Try to extract sample ID from sample, fallback to index
+            sample_id = sample.get('id', sample.get('problem_id', f"sample_{idx:05d}"))
+            if not isinstance(sample_id, str):
+                sample_id = str(sample_id)
+            
             result = process_sample(
                 sample,
                 engine,
@@ -762,7 +871,9 @@ def main():
                 max_turns=args.max_turns,
                 temperature=args.temperature,
                 top_p=args.top_p,
-                max_tokens=args.max_tokens
+                max_tokens=args.max_tokens,
+                output_dir=images_output_dir,
+                sample_id=sample_id
             )
             
             print(result)

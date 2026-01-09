@@ -16,7 +16,7 @@ config = OmegaConf.create({
 })
 
 dataset = MultiTurnSFTDataset(
-    parquet_files="/proj/inf-scaling/csl/svglm/data/geo3k_toolcall/processed_data_verl.parquet",
+    parquet_files="/proj/inf-scaling/csl/svglm/data/mathcanvas_toolcall/processed_data_verl.parquet",
     tokenizer=tokenizer,
     processor=processor,
     config=config

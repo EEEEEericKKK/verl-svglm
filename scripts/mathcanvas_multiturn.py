@@ -26,6 +26,15 @@ import datasets
 
 from verl.utils.hdfs_io import copy, makedirs
 
+def format_question(question):
+    formatted_msg = ""
+    for msg in question:
+        if msg["type"] == "text":
+            formatted_msg += msg["content"] + " "
+        elif msg["type"] == "image":
+            formatted_msg += "<image> "  # Placeholder for image
+    return formatted_msg.strip()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_dir", default=None, help="The save directory for the preprocessed dataset.")
@@ -33,36 +42,40 @@ if __name__ == "__main__":
     parser.add_argument("--local_dataset_path", default=None, help="The local path to the raw dataset, if it exists.")
     parser.add_argument(
         "--local_save_dir",
-        default="/proj/inf-scaling/csl/svglm/data/geo3k_multiturn_eval",
+        default="/proj/inf-scaling/csl/svglm/data/mathcanvas_test",
         help="The save directory for the preprocessed dataset.",
     )
 
     args = parser.parse_args()
     local_dataset_path = args.local_dataset_path
 
-    data_source = "hiyouga/geometry3k"
+    data_source = "shiwk24/MathCanvas-Instruct"
+    subsets = ["Plane_Geometry"]
 
-    if local_dataset_path is not None:
-        dataset = datasets.load_dataset(local_dataset_path)
-    else:
-        dataset = datasets.load_dataset(data_source)
+    dataset_splits = [datasets.load_dataset(data_source, subset) for subset in subsets]
+    test_dataset = datasets.concatenate_datasets(
+        [ds["train"].select(range(5000, 5100)) for ds in dataset_splits]
+    )
+    # save the test dataset
+    test_dataset.to_parquet(os.path.join(args.local_save_dir, "mathcanvas_test.parquet"))
+    exit(0)
 
-    train_dataset = dataset["train"]
-    test_dataset = dataset["test"]
 
     instruction_following = (
         r"You FIRST think about the reasoning process as an internal monologue and then provide the final answer. "
         r"The reasoning process MUST BE enclosed within <think> </think> tags. "
-        r"The final answer MUST BE put in \\boxed{}."
+        r"The final answer must be enclosed in \\boxed{ }."
     )
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
-            problem = example.pop("problem")
+            problem = example.pop("question_interleave")
+            problem = format_question(problem)
             prompt = problem + " " + instruction_following
             answer = example.pop("answer")
-            images = example.pop("images")
+            images = example.pop("question_images")
+            original_idx = example.pop("id")
             data = {
                 "data_source": data_source,
                 "prompt": [
@@ -82,7 +95,7 @@ if __name__ == "__main__":
                 "reward_model": {"style": "rule", "ground_truth": answer},
                 "extra_info": {
                     "split": split,
-                    "index": idx,
+                    "index": original_idx,
                     "answer": answer,
                     "question": problem,
                     "need_tools_kwargs": True,

@@ -57,14 +57,14 @@ DATA_ROOT=${DATA_ROOT:-$PWD}
 
 ENTRYPOINT=${ENTRYPOINT:-"-m verl.trainer.sft_trainer"}
 
-TRAIN_FILES=/proj/inf-scaling/csl/svglm/data/geo3k_toolcall/processed_data_verl.parquet
+TRAIN_FILES=/proj/inf-scaling/csl/svglm/data/mathcanvas_toolcall/processed_data_verl.parquet
 
 backend=${BACKEND:-fsdp}
 
-project_name=verl_sft_geo3k
+project_name=verl_sft_mathcanvas
 
 RESUME_MODE=auto
-MODEL_ID=lmms-lab/llava-next-qwen-32b
+MODEL_ID=/proj/inf-scaling/csl/svglm/checkpoints/Qwen3-VL-8B-Instruct
 # MODEL_ID=${HDFS_ROOT}/model/Qwen3-VL-30B-A3B-Instruct
 
 SP_SIZE=${SP_SIZE:-1}
@@ -116,19 +116,17 @@ MEGATRON_ENGINE_CONFIG="\
 if [ "$backend" = "fsdp" ]; then
     ENGINE_CONFIG="$FSDP_ENGINE_CONFIG"
     echo "Using fsdp engine"
-    exp_name=geo3k-llava-32b-${backend}-${FSDP_STRATEGY}-sp${SP_SIZE}-fsdp-1202a1
 else
     ENGINE_CONFIG="$MEGATRON_ENGINE_CONFIG"
     echo "Using megatron engine"
-    exp_name=geo3k-llava-32b-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-vpp${VPP_SIZE}-cp${CP_SIZE}-megatron-1202a1
 fi
-exp_name=geo3k-llava-32b_v1
+exp_name=mathcanvas-qwen3-vl-8b-instruct_v1
 
 CKPT_HOME="/proj/inf-scaling/csl/svglm/checkpoints/${project_name}/${exp_name}"
 mkdir -p "${CKPT_HOME}"
 
 export WANDB_API_KEY=55e59d4db1f11a22713ac08a884b1b44ce20caf2
-export WANDB_PROJECT=verl-geo3k-sft
+export WANDB_PROJECT=verl-mathcanvas-sft
 export WANDB_NAME=initial
 
 torchrun --nnodes=$NNODES --nproc-per-node=$NGPUS_PER_NODE --node-rank=$NODE_RANK --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT \

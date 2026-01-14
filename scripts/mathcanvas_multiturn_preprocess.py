@@ -49,12 +49,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     local_dataset_path = args.local_dataset_path
 
-    data_source = "shiwk24/MathCanvas-Instruct"
+    data_source = "shiwk24/MathCanvas-Bench"
     subsets = ["Plane_Geometry"]
 
     dataset_splits = [datasets.load_dataset(data_source, subset) for subset in subsets]
     test_dataset = datasets.concatenate_datasets(
-        [ds["train"].select(range(5000, 5100)) for ds in dataset_splits]
+        [ds["test"] for ds in dataset_splits]
     )
     # save the test dataset
     test_dataset.to_parquet(os.path.join(args.local_save_dir, "mathcanvas_test.parquet"))

@@ -384,24 +384,33 @@ def main():
                 # Extract sample ID
                 sample_id = original_sample.get('id', f'sample_{line_num}')
                 
-                # Extract ground truth answer
-                ground_truth = original_sample.get('answer', '')
+                # Extract ground truth answer (now at root level after refactor)
+                ground_truth = data.get('ground_truth', '')
                 if not ground_truth:
-                    ground_truth = original_sample.get('extra_info', {}).get('answer', '')
+                    # Fallback to original_sample for backward compatibility
+                    ground_truth = original_sample.get('answer', '')
                 
                 # Extract question from interleave format
                 question_interleave = original_sample.get('question_interleave', [])
+                
+                # Parse if it's a string representation of list
+                if isinstance(question_interleave, str):
+                    import ast
+                    try:
+                        question_interleave = ast.literal_eval(question_interleave)
+                    except:
+                        logger.warning(f"Sample {sample_id}: Failed to parse question_interleave")
+                        question_interleave = []
+                
                 question_parts = []
                 for item in question_interleave:
-                    if item.get('type') == 'text':
+                    if isinstance(item, dict) and item.get('type') == 'text':
                         question_parts.append(item.get('content', ''))
                 question = ' '.join(question_parts).strip()
                 
-                # Fallback to old format if no interleave
+                # Fallback if no interleave format found
                 if not question:
-                    question = original_sample.get('extra_info', {}).get('question', '')
-                    if not question:
-                        question = original_sample.get('question', '')
+                    question = original_sample.get('question', '')
                 
                 # Extract model's final answer from conversation
                 conversation = data.get('generated_conversation', [])
@@ -416,14 +425,15 @@ def main():
                 # Create extracted record
                 extracted_record = {
                     'sample_id': sample_id,
-                    'index': original_sample.get('extra_info', {}).get('index', line_num - 1),
                     'question': question,
                     'ground_truth': ground_truth,
                     'model_answer': model_answer,
                     'image_paths': image_paths,
                     'successful_tool_calls': successful_tool_calls,
                     'total_turns': data.get('metadata', {}).get('turns', 0),
-                    'total_tool_calls': data.get('metadata', {}).get('tool_calls', 0)
+                    'total_tool_calls': data.get('metadata', {}).get('tool_calls', 0),
+                    'knowledge': original_sample.get('knowledge', ''),
+                    'subknowledge': original_sample.get('subknowledge', '')
                 }
                 
                 # GPT verification if enabled

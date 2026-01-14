@@ -39,8 +39,12 @@ else
     OUTPUT_FILE="$2"
 fi
 
-# Get image base directory if provided
-IMAGE_BASE_DIR="/proj/inf-scaling/csl/svglm/data/MathCanvas-Bench"
+# Get image base directory (can be overridden by third argument)
+if [ -z "$3" ]; then
+    IMAGE_BASE_DIR="/proj/inf-scaling/csl/svglm/data/MathCanvas-Bench"
+else
+    IMAGE_BASE_DIR="$3"
+fi
 
 # Check if input file exists
 if [ ! -f "$INPUT_FILE" ]; then

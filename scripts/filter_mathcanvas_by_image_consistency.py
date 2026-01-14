@@ -138,7 +138,7 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    data_source = "shiwk24/MathCanvas-Instruct"
+    data_source = "shiwk24/MathCanvas-Bench"
     subsets = ["Solid_Geometry", "Plane_Geometry", "Trigonometry"]
     # subsets = ["Plane_Geometry"]
     
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     
     # Concatenate all training splits
     full_dataset = datasets.concatenate_datasets(
-        [ds["train"] for ds in dataset_splits]
+        [ds["test"] for ds in dataset_splits]
     )
     
     print(f"Total samples before filtering: {len(full_dataset)}")

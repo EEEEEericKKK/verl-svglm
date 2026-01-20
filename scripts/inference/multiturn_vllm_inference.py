@@ -27,6 +27,10 @@ from tqdm import tqdm
 from transformers import AutoProcessor, AutoTokenizer
 from vllm import LLM, SamplingParams
 
+# Prevent multiprocessing issues with CUDA
+os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -35,24 +39,9 @@ logger = logging.getLogger(__name__)
 # System Prompt Configuration
 # ============================================================================
 
-SYSTEM_PROMPT_WITH_TOOL = (
-    "You are an expert geometry tutor specializing in solving plane geometry, "
-    "solid geometry, and analytic geometry problems. Your goal is to analyze "
-    "problems step-by-step, provide clear mathematical reasoning, and deliver "
-    "accurate solutions.\n\n"
-    "You have access to the svg_tool which generates geometric diagrams. Use it when:\n"
-    "- A diagram is needed to visualize the problem or solution steps\n"
-    "- Adding auxiliary constructions (helper lines) would clarify relationships\n"
-    "- Reconstructing a complete diagram helps illustrate the problem setup\n\n"
-    "**Tool Usage:**\n"
-    "- Tool name: svg_tool\n"
-    "- Arguments:\n"
-    "  - svg_str: SVG code for the diagram (use 1000x1000 viewBox)\n"
-    "  - task_type: Either 'full_reconstruction' or 'auxiliary'\n\n"
-    "Before drawing, state your reasoning starting with 'Thinking for Drawing:'. "
-    "Include coordinates and geometric relationships.\n"
-    "Present final answers in boxed format: \\boxed{answer}"
-)
+prompt_path = "/proj/inf-scaling/csl/svglm/data/system_prompt_svgtool.txt"
+with open(prompt_path, "r") as f:
+    SYSTEM_PROMPT_WITH_TOOL = f.read().strip()
 
 SYSTEM_PROMPT_WITHOUT_TOOL = (
     "You are an expert in solving plane geometry reasoning problems. "
@@ -235,7 +224,7 @@ class SVGTool:
             # Store generated image
             self._instances[instance_id]["images"].append(processed)
             
-            return processed, "", True
+            return processed, "Here is the rendered image.", True
             
         except Exception as e:
             error_msg = f"Error rendering SVG: {str(e)}"
@@ -286,21 +275,23 @@ class SVGTool:
 
 def extract_tool_call(text: str) -> Optional[Dict[str, Any]]:
     """Extract tool call JSON from assistant message."""
-    start_tag, end_tag = '<tool_call>', '</tool_call>'
-    start = text.find(start_tag)
-    if start == -1:
-        return None
+    tool_tag_pairs = [
+        ['<tool_call>', '</tool_call>'],
+        ['<tool>', '</tool>']
+    ]
     
-    end = text.find(end_tag, start + len(start_tag))
-    if end == -1:
-        return None
-    
-    try:
-        payload_str = text[start + len(start_tag):end]
-        return json.loads(payload_str)
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse tool call: {e}")
-        return None
+    for start_tag, end_tag in tool_tag_pairs:
+        start = text.find(start_tag)
+        if start != -1:
+            end = text.find(end_tag, start + len(start_tag))
+            if end != -1:
+                try:
+                    payload_str = text[start + len(start_tag):end]
+                    return json.loads(payload_str)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse tool call: {e}")
+                    return None
+    return None
 
 
 def extract_thinking(text: str) -> tuple[str, str]:
@@ -356,6 +347,16 @@ class MultiTurnInferenceEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         
+        # Detect model type for proper multimodal handling
+        config_path = Path(model_path) / "config.json"
+        self.is_qwen_model = False
+        if config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+                model_type = config.get("model_type", "").lower()
+                self.is_qwen_model = "qwen" in model_type
+        logger.info(f"Model type detection: is_qwen_model={self.is_qwen_model}")
+        
         logger.info("Initializing vLLM engine")
         self.llm = LLM(
             model=model_path,
@@ -377,8 +378,65 @@ class MultiTurnInferenceEngine:
         max_tokens: int = 2048,
     ) -> str:
         """Generate a single response from the model."""
+        # Convert messages for chat template: tool messages become user messages
+        # to maintain user/assistant alternation
+        filtered_messages = []
+        last_role = None
+        system_prompt = None
+        
+        for msg in messages:
+            role = msg.get('role')
+            
+            # Extract system message but don't add it yet (LLaVA doesn't support system role)
+            if role == 'system':
+                if system_prompt is None:
+                    system_prompt = msg.get('content', '')
+                continue
+            
+            # Convert tool to user
+            if role == 'tool':
+                role = 'user'
+                msg = {'role': 'user', 'content': msg.get('content', '')}
+            
+            # Skip consecutive messages with the same role to maintain alternation
+            if role in ['user', 'assistant']:
+                if role != last_role or role == 'user':  # Allow consecutive user messages
+                    filtered_messages.append(msg)
+                    last_role = role
+        
+        # Ensure we end with a user message if we're adding generation prompt
+        if filtered_messages and filtered_messages[-1].get('role') == 'assistant':
+            # This shouldn't happen if we're calling generate_response correctly
+            logger.warning("Last message is assistant, which is unusual for generation")
+        
+        # Handle chat template differently based on model type
+        if self.is_qwen_model:
+            # Qwen models: Keep multimodal structure as-is for chat template
+            # Qwen's chat template natively handles list-format content with images
+            template_messages = filtered_messages
+        else:
+            # LLaVA models: Convert list-format content to string with <image> placeholders
+            # LLaVA expects string content with placeholders for multimodal
+            template_messages = []
+            for msg in filtered_messages:
+                msg_copy = msg.copy()
+                content = msg_copy.get('content')
+                if isinstance(content, list):
+                    # Convert multimodal list to string with <image> placeholders
+                    text_parts = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            if item.get('type') == 'text':
+                                text_parts.append(item.get('text', ''))
+                            elif item.get('type') == 'image':
+                                text_parts.append('<image>')
+                            elif item.get('type') == 'video':
+                                text_parts.append('<video>')
+                    msg_copy['content'] = ''.join(text_parts) if text_parts else ''
+                template_messages.append(msg_copy)
+        
         prompt = self.tokenizer.apply_chat_template(
-            messages,
+            template_messages,
             tokenize=False,
             add_generation_prompt=True
         )
@@ -759,10 +817,35 @@ def process_sample(
     # Build messages with media
     processed_messages = build_messages(messages, images, videos, image_patch_size)
     
-    # Add system prompt if not already present
-    if not processed_messages or processed_messages[0].get('role') != 'system':
-        system_prompt = get_system_prompt(enable_tool_call)
-        processed_messages.insert(0, {"role": "system", "content": system_prompt})
+    # Remove any existing system messages
+    processed_messages = [msg for msg in processed_messages if msg.get('role') != 'system']
+    
+    # Prepend system prompt to first user message (LLaVA-compatible)
+    system_prompt = get_system_prompt(enable_tool_call)
+    if processed_messages:
+        for idx, msg in enumerate(processed_messages):
+            if msg.get('role') == 'user':
+                content = msg.get('content')
+                # Handle both string and list content
+                if isinstance(content, str):
+                    processed_messages[idx]['content'] = f"{system_prompt}\n\n{content}"
+                elif isinstance(content, list):
+                    # Prepend system prompt to first text element
+                    modified_content = []
+                    system_added = False
+                    for item in content:
+                        if not system_added and isinstance(item, dict) and item.get('type') == 'text':
+                            modified_item = item.copy()
+                            modified_item['text'] = f"{system_prompt}\n\n{item.get('text', '')}"
+                            modified_content.append(modified_item)
+                            system_added = True
+                        else:
+                            modified_content.append(item)
+                    # If no text element found, prepend new text element
+                    if not system_added:
+                        modified_content = [{'type': 'text', 'text': system_prompt}] + content
+                    processed_messages[idx]['content'] = modified_content
+                break
     
     # Save input images
     sample_output_dir = None

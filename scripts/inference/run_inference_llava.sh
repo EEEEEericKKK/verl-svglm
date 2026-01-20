@@ -4,36 +4,48 @@
 
 set -e  # Exit on error
 
+export PYTHONNOUSERSITE=1
+export CUDA_HOME=/usr/local/cuda-12.8
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export HF_HOME=/proj/inf-scaling/huggingface
+export TMPDIR=/proj/inf-scaling/TMP
+export VLLM_CACHE_ROOT=/proj/inf-scaling/csl/.cache
+
+export WANDB_API_KEY=55e59d4db1f11a22713ac08a884b1b44ce20caf2
+export WANDB_PROJECT=llamafactory-mathcanvas-sft
+export WANDB_NAME=mathcanvas-llava3-8b-full-sft
+
 # ============================================================================
 # Default Configuration
 # ============================================================================
 
 # Model configuration
-MODEL_PATH="${MODEL_PATH:-/proj/inf-scaling/csl/svglm/checkpoints/Qwen3-VL-8B-Instruct}"
+MODEL_PATH="${MODEL_PATH:-/proj/inf-scaling/csl/svglm/LlamaFactory/saves/llava-v1.6-mistral-7b-hf/full/sft_mathcanvas}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-32}"
 NUM_GPUS="${NUM_GPUS:-8}"  # Number of GPUs for data parallelism
 
 # Data configuration
-DATA_PATH="${DATA_PATH:-/proj/inf-scaling/csl/svglm/data/mathcanvas_test/mathcanvas_test.parquet}"
-OUTPUT_PATH="${OUTPUT_PATH:-/proj/inf-scaling/csl/svglm/verl/outputs/inference/Mathcanvas-Bench_zeroshot_lastmessage.jsonl}"
+DATA_PATH="${DATA_PATH:-/proj/inf-scaling/csl/svglm/data/hf_template/mathcanvas_test/mathcanvas_test.parquet}"
+OUTPUT_PATH="${OUTPUT_PATH:-/proj/inf-scaling/csl/svglm/verl/outputs/inference/Mathcanvas-llava-sft.jsonl}"
 MESSAGES_KEY="${MESSAGES_KEY:-messages}"
 IMAGE_KEY="${IMAGE_KEY:-question_images}"
 VIDEO_KEY="${VIDEO_KEY:-videos}"
 IMAGE_PATCH_SIZE="${IMAGE_PATCH_SIZE:-14}"
 NUM_SAMPLES="${NUM_SAMPLES:-}"
 GROUND_TRUTH_KEY="${GROUND_TRUTH_KEY:-answer}"
-KEEP_ASSISTANT="${KEEP_ASSISTANT:-last}"  # "first" or "last" - which assistant message to keep before generation
+KEEP_ASSISTANT="${KEEP_ASSISTANT:-first}"  # "first" or "last" - which assistant message to keep before generation
 DATASET_FORMAT="${DATASET_FORMAT:-mathcanvas}"  # Dataset format: "sft" or custom formats
 
 # Generation configuration
-MAX_TURNS="${MAX_TURNS:-10}"
+MAX_TURNS="${MAX_TURNS:-3}"
 TEMPERATURE="${TEMPERATURE:-0.7}"
 TOP_P="${TOP_P:-0.9}"
-MAX_TOKENS="${MAX_TOKENS:-2048}"
-ENABLE_TOOL_CALL="${ENABLE_TOOL_CALL:-false}"
+MAX_TOKENS="${MAX_TOKENS:-16384}"
+ENABLE_TOOL_CALL="${ENABLE_TOOL_CALL:-true}"
 
 
 # ============================================================================
